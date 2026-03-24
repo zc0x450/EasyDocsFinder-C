@@ -4,11 +4,18 @@ project(EasyDocsFinder C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # 导出compile_commands.json文件，方便代码分析工具使用
 
 add_executable(easydocsfinder
     src/main.c
+    src/search.c
 )
 
+target_include_directories(easydocsfinder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# 以下为测试
 enable_testing()
 
 # 测试解析参数（简化版）

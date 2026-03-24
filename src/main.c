@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "search.h"
+
 // 简单起见，限制最多64个根目录和64个忽略模式，方便定义数组
 #define MAX_ROOTS 64
 #define MAX_IGNORE 64
@@ -177,29 +179,18 @@ int main(int argc, char ** argv) {
         return 2;
     }
 
-    // 测试打印解析后的参数
-    printf("Parsed arguments:\n");
-
-    printf("roots[%d]:", roots_count);
-    for (int k = 0; k < roots_count; k++) {
-        printf(" [%s]", roots[k]);
+    size_t found = search_files_single_thread(
+        roots,
+        (size_t)roots_count,
+        pattern,
+        ignore_patterns,
+        (size_t)ignore_count,
+        (size_t)(max_results < 0 ? 0 : max_results)
+    );
+    
+    if (found == 0) {
+        fprintf(stderr, "No matching files found.\n");
     }
-    printf("\n");
-
-    printf("pattern=%s\n", pattern);
-
-    printf("ignore[%d]:", ignore_count);
-    for (int k = 0; k < ignore_count; k++) {
-        printf(" [%s]", ignore_patterns[k]);
-    }
-    printf("\n");
-
-    printf("max_results=%d\n", max_results);
-    printf("concurrent=%s\n", concurrent ? "true" : "false");
-    printf("workers=%d\n", workers);
-
-    printf("contains=%s\n", contains ? contains : "(null)");
-    printf("encoding=%s\n", encoding);
 
     return 0;
 }
