@@ -105,10 +105,11 @@ static size_t walk_dir(
         bool is_dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;  // 判断文件或目录是否是目录
 
         if (is_dir) {
-            // 如果是目录，则调用join_path函数将dir和name拼接成子目录的完整路径
+            // 如果是目录，先看看是否需要忽略
+            if (should_ignore_name(ignore_patterns, ignore_count, name)) continue;
+            // 无需忽略，则调用join_path函数将dir和name拼接成子目录的完整路径，并递归遍历子目录
             char child[SEARCH_PATH_BUF];
             join_path(child, sizeof(child), dir, name);
-            // 递归遍历子目录
             found = walk_dir(child, pattern, ignore_patterns, ignore_count, max_results, found);
             if (max_results > 0 && found >= max_results) break;
         } else {
@@ -144,13 +145,15 @@ static size_t search_root(
     DWORD attr = GetFileAttributesA(root);
     if (attr == INVALID_FILE_ATTRIBUTES) return found;
 
+    const char * name = basename_of(root);
     if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        // 如果是目录，则递归遍历目录
+        // 如果是目录，则先看看是否需要忽略
+        if (should_ignore_name(ignore_patterns, ignore_count, name)) return found;
+        // 无需忽略，则递归遍历目录
         return walk_dir(root, pattern, ignore_patterns, ignore_count, max_results, found);
     }
 
-    // 如果是文件，则进行文件名匹配
-    const char * name = basename_of(root);
+    // 如果是文件，则进行文件名匹配，看看是否需要忽略，并且是否匹配模式
     if (!should_ignore_name(ignore_patterns, ignore_count, name) && wildcard_match(pattern, name)) {
         puts(root);  // 输出文件路径
         found++;
