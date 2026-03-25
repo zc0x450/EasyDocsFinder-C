@@ -4,8 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
+#include <inttypes.h>
 
 #define SEARCH_PATH_BUF 4096
+
+
 
 static bool wildcard_match(const char * pattern, const char * text) {
     // 支持：* 任意长度；? 单字符；其他字符按字面匹配
@@ -77,6 +81,32 @@ static bool should_ignore_name(const char ** ignore_patterns, size_t ignore_coun
     return false;
 }
 
+
+static void format_filetime_local(const FILETIME * ft, char * out, size_t outsz) {
+    // Windows通过FILETIME结构体来表示文件时间，它是从1601-01-01 00:00:00开始的100ns计数
+    // 本函数将FILETIME转换为本地的SYSTEMTIME，并格式化输出
+    FILETIME localFt;
+    SYSTEMTIME st;
+
+    // 这里尝试用FileTimeToLocalFileTime先将UTC时间的ft转换为本地时间的localFt，
+    // 然后再用FileTimeToSystemTime将localFt转换为SYSTEMTIME，以便后续格式化输出
+    if (
+        !FileTimeToLocalFileTime(ft, &localFt) || 
+        !FileTimeToSystemTime(&localFt, &st)
+    ) {
+        // 如果转换失败，则输出0000-00-00 00:00:00
+        snprintf(out, outsz, "Invalid time");
+        return;
+    }
+
+    // 如果转换成功，则将格式化数据写入out中
+    snprintf(out, outsz, "%04u-%02u-%02u %02u:%02u:%02u",
+        (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
+        (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond
+    );
+}
+
+
 static size_t walk_dir(
     const char * dir,
     const char * pattern,
@@ -119,8 +149,17 @@ static size_t walk_dir(
             if (wildcard_match(pattern, name)) {
                 char full[SEARCH_PATH_BUF];
                 join_path(full, sizeof(full), dir, name);
-                puts(full);
+                
+                char mtime[32];
+                // 格式化之后的文件修改时间存储在mtime中
+                format_filetime_local(&data.ftLastWriteTime, mtime, sizeof(mtime));
+                // 把文件大小的高32位左移32位，通过和低32位做或运算，得到一个64位整数，即文件大小
+                uint64_t size64 = ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
+                // 输出文件路径、文件大小和文件修改时间
+                printf("%s | %" PRIu64 " bytes | mtime=%s\n", full, size64, mtime);
+
                 found++;
+
                 if (max_results > 0 && found >= max_results) break;
             }
         }
@@ -155,7 +194,24 @@ static size_t search_root(
 
     // 如果是文件，则进行文件名匹配，看看是否需要忽略，并且是否匹配模式
     if (!should_ignore_name(ignore_patterns, ignore_count, name) && wildcard_match(pattern, name)) {
-        puts(root);  // 输出文件路径
+        
+        // 注意这里用的结构体是WIN32_FILE_ATTRIBUTE_DATA，而不是WIN32_FIND_DATAA，
+        // 前面遍历目录时使用结构体WIN32_FIND_DATAA，配合函数FindFirstFileA和FindNextFileA，
+        // 这里是获取单个文件的属性信息，所以使用结构体WIN32_FILE_ATTRIBUTE_DATA，配合函数GetFileAttributesExA
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (GetFileAttributesExA(root, GetFileExInfoStandard, &fad)) {
+
+            // 这部分操作和前面相同，不再赘述
+            char mtime[32];
+            format_filetime_local(&fad.ftLastWriteTime, mtime, sizeof(mtime));
+            uint64_t size64 = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+            printf("%s | %" PRIu64 " bytes | mtime=%s\n", root, size64, mtime);
+
+        } else {
+            // 如果拿不到信息就退化为只打印路径
+            printf("Failed to get file attributes for %s\n", root);
+        }
+
         found++;
     }
     return found;
