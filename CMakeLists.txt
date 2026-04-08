@@ -57,3 +57,12 @@ add_test(NAME search_max_results
 add_test(NAME ignore_dir_exclude
   COMMAND ${CMAKE_COMMAND} -Dexe=$<TARGET_FILE:easydocsfinder> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ignore_dir_exclude.cmake
 )
+
+# 5) 搜索包含指定内容
+add_test(NAME contains_hit
+  COMMAND ${CMAKE_COMMAND} -Dexe=$<TARGET_FILE:easydocsfinder> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_contains_hit.cmake
+)
+
+add_test(NAME contains_miss
+  COMMAND ${CMAKE_COMMAND} -Dexe=$<TARGET_FILE:easydocsfinder> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_contains_miss.cmake
+)

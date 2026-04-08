@@ -6,9 +6,9 @@
 #include <stdbool.h>
 #include <time.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 #define SEARCH_PATH_BUF 4096
-
 
 
 static bool wildcard_match(const char * pattern, const char * text) {
@@ -51,6 +51,7 @@ static bool wildcard_match(const char * pattern, const char * text) {
     return *p == '\0';  // 把*都消耗完之后，如果pattern也到头了，说明匹配成功，否则匹配失败
 }
 
+
 static const char * basename_of(const char * path) {
     // 在path中找到最后一个斜杠或反斜杠的位置
     const char * s1 = strrchr(path, '\\');
@@ -58,6 +59,7 @@ static const char * basename_of(const char * path) {
     const char * s = s1 > s2 ? s1 : s2;  // 取s1和s2中位置较后的那个
     return s ? (s + 1) : path;  // 如果s不为空，则返回s+1，否则返回path
 }
+
 
 static void join_path(char * out, size_t outsz, const char * a, const char * b) {
     // 将a和b拼接成一个完整的路径，并存储在out中
@@ -70,6 +72,7 @@ static void join_path(char * out, size_t outsz, const char * a, const char * b) 
         snprintf(out, outsz, "%s\\%s", a, b);
     }
 }
+
 
 static bool should_ignore_name(const char ** ignore_patterns, size_t ignore_count, const char *name) {
     // 遍历所有忽略模式，如果name与某个忽略模式匹配，则返回true
@@ -107,13 +110,162 @@ static void format_filetime_local(const FILETIME * ft, char * out, size_t outsz)
 }
 
 
+static bool bytes_contains(const unsigned char * hay, size_t hay_len,
+                           const unsigned char * needle, size_t needle_len) {
+    if (needle_len == 0) return true;  // 如果要搜索的字符串为NULL或者是空字符串，则认为无需搜索，直接返回true
+    if (hay_len < needle_len) return false;  // 如果hay的长度小于needle的长度，则认为无需搜索，直接返回false
+
+    for (size_t i = 0; i + needle_len <= hay_len; i++) {
+        // 这里直接遍历待搜索的hay字符串，逐字符比较，
+        // 如果当前hay中第i个字符与needle的第一个字符相同，则继续比较后续的字符
+        if (hay[i] == needle[0] && memcmp(hay + i, needle, needle_len) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+// 判断路径path中的文件内容是否包含字符串needle
+static bool file_contains_substring(const char * path, const char * needle) {
+    // 如果要搜索的字符串为NULL或者是空字符串，则认为无需搜索，直接返回true
+    if (!needle) return true;  
+
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return true;
+
+    // 这里通过二进制模式打开文件，避免对于换行符的特殊处理，并返回一个文件指针
+    FILE * fp = fopen(path, "rb");
+    if (!fp) return false;
+
+    // 设置一次读取数据块的大小为64KB
+    const size_t BUF = 64 * 1024;
+    // 设置重叠区域的大小为needle的长度减1，用于处理待搜索字符串横跨两个数据块的情况
+    size_t overlap = (needle_len > 1) ? (needle_len - 1) : 0;
+
+    // 实际缓冲区的总大小为BUF + overlap，用于存储读取的数据
+    unsigned char * buf = (unsigned char *)malloc(BUF + overlap);
+    if (!buf) {
+        // 缓冲区没有分配成功，则关闭文件，并返回false
+        fclose(fp);
+        return false;
+    }
+
+    size_t carry = 0;  // carry指示当前缓冲区的开头有多少字节是之前读取的数据中保留的
+    bool hit = false;  // hit表示是否找到了包含needle的子字符串
+
+    for (;;) {
+        // 每一轮将文件fp中最多BUF * 1字节的数据读取到buf + carry的位置，n表示实际读取的字节数，
+        // 注意buf中前carry个字节是之前读取的数据中保留的，从carry开始往后的位置才是新读取的数据
+        size_t n = fread(buf + carry, 1, BUF, fp);
+        if (n == 0) break;
+
+        size_t total = carry + n;  // 总共用于寻找needle字符串的内容的字节数
+        if (bytes_contains(buf, total, (const unsigned char *)needle, needle_len)) {
+            // 在buf中长度位total的内容区间中寻找是否包含needle字符串
+            hit = true;
+            break;
+        }
+
+        if (overlap > 0) {
+            // 通过memmove函数将buf+total-carry位置开始的carry字节的数据移动到buf的开头，
+            // 用于拼接到下一次读取的数据中，继续寻找needle字符串
+            carry = (total < overlap) ? total : overlap;
+            memmove(buf, buf + (total - carry), carry);
+        }
+        else {
+            carry = 0;
+        }
+    }
+
+    // 释放缓冲区
+    free(buf);
+    // 关闭文件
+    fclose(fp);
+    return hit;
+}
+
+
+// 这里的设计其实比较粗糙，因为当前是确定了某个文件中包含要搜索的内容后，再次打开文件，读取并打印这些内容的，
+// 后续再改进吧
+static void print_content_matches(const char * path, const char * needle) {
+    // 如果要搜索的字符串为NULL或者是空字符串，则认为无需搜索，直接返回
+    if (!needle) return;
+
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return;
+
+    // 通过二进制模式打开文件，避免对于换行符的特殊处理，并返回一个文件指针
+    FILE * fp = fopen(path, "rb");
+    if (!fp) return;
+
+    // 初始设置一行的最大长度为4096字节，后面会根据需要动态调整
+    size_t cap = 4096;
+    size_t len = 0;  // 记录当前行的长度
+    char * line = (char *)malloc(cap);
+    if (!line) { fclose(fp); return; }
+
+    int ch;
+    while ((ch = fgetc(fp)) != EOF) {
+        // 逐字符读取文件内容，如果当前行的长度已经达到了cap，则需要重新分配内存
+        if (len + 1 >= cap) {
+            size_t ncap = cap * 2;
+            char * nline = (char *)realloc(line, ncap);
+            if (!nline) { free(line); fclose(fp); return; }
+            // 重新分配内存后，更新line指针和cap
+            line = nline;
+            cap = ncap;
+        }
+        line[len++] = (char)ch;
+
+        if (ch == '\n') {
+            line[len] = '\0';
+
+            // 去掉行尾 \r\n / \n，方便输出
+            size_t printable_len = len;
+            while (printable_len > 0 &&
+                   (line[printable_len - 1] == '\n' || line[printable_len - 1] == '\r')) {
+                line[--printable_len] = '\0';
+            }
+
+            // 如果当前行中包含要搜索的内容，则打印该行
+            if (strstr(line, needle) != NULL) {
+                printf("  %s\n", line);
+            }
+
+            len = 0;
+        }
+    }
+
+    // 处理最后一行没有 \n 的情况，line中还剩余读到EOF之前未处理完的内容
+    if (len > 0) {
+        line[len] = '\0';
+        size_t printable_len = len;
+        // 已经确定没有\n了，所以只需要处理\r
+        while (printable_len > 0 && line[printable_len - 1] == '\r') {
+            line[--printable_len] = '\0';
+        }
+
+        if (strstr(line, needle) != NULL) {
+            printf("  %s\n", line);
+        }
+    }
+
+    // 释放内存并关闭文件
+    free(line);
+    fclose(fp);
+}
+
+
 static size_t walk_dir(
     const char * dir,
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
     size_t max_results,
-    size_t found
+    size_t found,
+    const char * contains
 ) {
     // 如果找到的结果数量达到最大限制，则停止搜索
     if (max_results > 0 && found >= max_results) return found;
@@ -140,7 +292,7 @@ static size_t walk_dir(
             // 无需忽略，则调用join_path函数将dir和name拼接成子目录的完整路径，并递归遍历子目录
             char child[SEARCH_PATH_BUF];
             join_path(child, sizeof(child), dir, name);
-            found = walk_dir(child, pattern, ignore_patterns, ignore_count, max_results, found);
+            found = walk_dir(child, pattern, ignore_patterns, ignore_count, max_results, found, contains);
             if (max_results > 0 && found >= max_results) break;
         } else {
             // 如果是文件，先看看是否需要忽略
@@ -149,6 +301,9 @@ static size_t walk_dir(
             if (wildcard_match(pattern, name)) {
                 char full[SEARCH_PATH_BUF];
                 join_path(full, sizeof(full), dir, name);
+
+                // 如果指定了要搜索的内容，则检查文件内容是否包含指定的内容
+                if (contains && !file_contains_substring(full, contains)) continue;
                 
                 char mtime[32];
                 // 格式化之后的文件修改时间存储在mtime中
@@ -157,6 +312,11 @@ static size_t walk_dir(
                 uint64_t size64 = ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
                 // 输出文件路径、文件大小和文件修改时间
                 printf("%s | %" PRIu64 " bytes | mtime=%s\n", full, size64, mtime);
+
+                // 打印文件内容
+                if (contains) {
+                    print_content_matches(full, contains);
+                }
 
                 found++;
 
@@ -169,13 +329,15 @@ static size_t walk_dir(
     return found;
 }
 
+
 static size_t search_root(
     const char * root,
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
     size_t max_results,
-    size_t found
+    size_t found,
+    const char * contains
 ) {
     // 该函数只处理根目录，根据找到的是目录还是文件，分别调用walk_dir或进行文件名匹配
     if (max_results > 0 && found >= max_results) return found;
@@ -189,7 +351,7 @@ static size_t search_root(
         // 如果是目录，则先看看是否需要忽略
         if (should_ignore_name(ignore_patterns, ignore_count, name)) return found;
         // 无需忽略，则递归遍历目录
-        return walk_dir(root, pattern, ignore_patterns, ignore_count, max_results, found);
+        return walk_dir(root, pattern, ignore_patterns, ignore_count, max_results, found, contains);
     }
 
     // 如果是文件，则进行文件名匹配，看看是否需要忽略，并且是否匹配模式
@@ -200,12 +362,18 @@ static size_t search_root(
         // 这里是获取单个文件的属性信息，所以使用结构体WIN32_FILE_ATTRIBUTE_DATA，配合函数GetFileAttributesExA
         WIN32_FILE_ATTRIBUTE_DATA fad;
         if (GetFileAttributesExA(root, GetFileExInfoStandard, &fad)) {
+            if (contains && !file_contains_substring(root, contains)) return found;
 
             // 这部分操作和前面相同，不再赘述
             char mtime[32];
             format_filetime_local(&fad.ftLastWriteTime, mtime, sizeof(mtime));
             uint64_t size64 = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
             printf("%s | %" PRIu64 " bytes | mtime=%s\n", root, size64, mtime);
+
+            // 打印文件内容
+            if (contains) {
+                print_content_matches(root, contains);
+            }
 
         } else {
             // 如果拿不到信息就退化为只打印路径
@@ -224,13 +392,14 @@ size_t search_files_single_thread(
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
-    size_t max_results
+    size_t max_results,
+    const char * contains
 ) {
     // 入口函数，用于遍历所有根目录，并调用search_root函数进行搜索
     size_t found = 0;
 
     for (size_t i = 0; i < roots_count; i++) {
-        found = search_root(roots[i], pattern, ignore_patterns, ignore_count, max_results, found);
+        found = search_root(roots[i], pattern, ignore_patterns, ignore_count, max_results, found, contains);
         // 如果找到的结果数量达到最大限制，则停止搜索
         if (max_results > 0 && found >= max_results) break;
     }

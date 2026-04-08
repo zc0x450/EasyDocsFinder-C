@@ -185,7 +185,8 @@ int main(int argc, char ** argv) {
         pattern,
         ignore_patterns,
         (size_t)ignore_count,
-        (size_t)(max_results < 0 ? 0 : max_results)
+        (size_t)(max_results < 0 ? 0 : max_results),
+        contains
     );
     
     if (found == 0) {

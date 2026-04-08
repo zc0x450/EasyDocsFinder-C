@@ -19,7 +19,8 @@ size_t search_files_single_thread(
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
-    size_t max_results
+    size_t max_results,
+    const char * contains
 );
 
 #ifdef __cplusplus
