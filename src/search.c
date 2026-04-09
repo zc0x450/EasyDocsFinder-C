@@ -11,6 +11,62 @@
 #define SEARCH_PATH_BUF 4096
 
 
+typedef struct {
+    char ** items;  // 存储路径的指针数组
+    size_t len;  // 当前已经存储路径的数量
+    size_t cap;  // 当前已经分配的内存空间大小
+} StrVec;
+
+
+static void str_vec_init(StrVec * v) {
+    // 初始化StrVec结构体
+    v->items = NULL;
+    v->len = 0;
+    v->cap = 0;
+}
+
+
+static void str_vec_free(StrVec * v) {
+    // 释放items数组中的每个字符串，以及items数组本身
+    for (size_t i = 0; i < v->len; i++) {
+        free(v->items[i]);
+    }
+    free(v->items);
+    str_vec_init(v);  // 重新初始化StrVec结构体
+}
+
+
+static bool str_vec_push(StrVec * v, char * s) {
+    if (v->len + 1 > v->cap) {
+        // 如果要存储的路径数量超过了当前已经分配的内存空间大小，则需要重新分配内存
+        size_t ncap = v->cap ? v->cap * 2 : 16;
+        char ** nitems = (char **)realloc(v->items, ncap * sizeof(char *));
+        if (!nitems) {
+            // 如果重新分配内存失败，则释放s指向的内存，并返回false
+            free(s);
+            return false;
+        }
+        // 如果重新分配内存成功，则更新v->items和v->cap
+        v->items = nitems;
+        v->cap = ncap;
+    }
+    v->items[v->len++] = s;  // 将s存储到v->items中，并且v->len加1
+    return true;
+}
+
+
+static char * dup_path(const char * path) {
+    // 计算path的长度，并加上1个字节用于存储\0
+    size_t n = strlen(path) + 1;
+    // 分配n个字节的内存，用于存储path
+    char * p = (char *)malloc(n);
+    if (!p) return NULL;
+    // 将path复制到p中
+    memcpy(p, path, n);
+    return p;
+}
+
+
 static bool wildcard_match(const char * pattern, const char * text) {
     // 支持：* 任意长度；? 单字符；其他字符按字面匹配
     const char * p = pattern;  // 用p来遍历模式字符串
@@ -258,26 +314,64 @@ static void print_content_matches(const char * path, const char * needle) {
 }
 
 
-static size_t walk_dir(
+static size_t emit_candidates(StrVec * candidates, const char * contains, size_t max_results) {
+    size_t emitted = 0;
+
+    // 遍历所有的候选文件路径，逐一处理
+    for (size_t i = 0; i < candidates->len; i++) {
+        const char * path = candidates->items[i];  // 获取当前候选文件路径
+
+        // 如果指定了要搜索的内容，则检查文件内容是否包含指定的内容
+        if (contains && !file_contains_substring(path, contains)) {
+            continue;
+        }
+
+        // 获取文件的属性信息，使用结构体WIN32_FILE_ATTRIBUTE_DATA，配合函数GetFileAttributesExA
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
+            char mtime[32];  // 格式化之后的文件修改时间存储在mtime中
+            format_filetime_local(&fad.ftLastWriteTime, mtime, sizeof(mtime));
+            // 把文件大小的高32位左移32位，通过和低32位做或运算，得到一个64位整数，即文件大小
+            uint64_t size64 = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+            // 输出文件路径、文件大小和文件修改时间
+            printf("%s | %" PRIu64 " bytes | mtime=%s\n", path, size64, mtime);
+            // 如果指定了要搜索的内容，则打印文件中匹配到的内容
+            if (contains) {
+                print_content_matches(path, contains);
+            }
+        } else {
+            // 如果拿不到信息就打印提示信息
+            printf("Failed to get file attributes for %s\n", path);
+        }
+
+        emitted++;  // 找到一个匹配的文件，则计数器加1
+
+        // 如果设置了max_results，并且找到的文件数量达到了最大限制，则停止搜索
+        if (max_results > 0 && emitted >= max_results) {
+            break;
+        }
+    }
+
+    return emitted;  // 返回找到的匹配的文件数量
+}
+
+
+static void walk_dir(
     const char * dir,
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
-    size_t max_results,
-    size_t found,
-    const char * contains
+    StrVec * candidates
 ) {
-    // 如果找到的结果数量达到最大限制，则停止搜索
-    if (max_results > 0 && found >= max_results) return found;
-
     char search_path[SEARCH_PATH_BUF];
     // 通过snprintf函数将dir和\*拼接并写入search_path中
     snprintf(search_path, sizeof(search_path), "%s\\*", dir);
 
     WIN32_FIND_DATAA data;  // 用于存储每个文件或目录的详细信息的结构体
+    // 这里通过结构体WIN32_FIND_DATAA，配合函数FindFirstFileA和FindNextFileA来遍历目录下的所有文件和目录
     // 通过FindFirstFileA函数按照search_path指定的路径查找第一个结果，将结果存储在data中
     HANDLE h = FindFirstFileA(search_path, &data);  // 如果成功，会返回一个有效句柄
-    if (h == INVALID_HANDLE_VALUE) return found;  // 如果返回的句柄无效，就停止搜索
+    if (h == INVALID_HANDLE_VALUE) return;  // 如果返回的句柄无效，就停止搜索
 
     do {
         const char * name = data.cFileName;  // 获取文件或目录的名称
@@ -292,8 +386,7 @@ static size_t walk_dir(
             // 无需忽略，则调用join_path函数将dir和name拼接成子目录的完整路径，并递归遍历子目录
             char child[SEARCH_PATH_BUF];
             join_path(child, sizeof(child), dir, name);
-            found = walk_dir(child, pattern, ignore_patterns, ignore_count, max_results, found, contains);
-            if (max_results > 0 && found >= max_results) break;
+            walk_dir(child, pattern, ignore_patterns, ignore_count, candidates);
         } else {
             // 如果是文件，先看看是否需要忽略
             if (should_ignore_name(ignore_patterns, ignore_count, name)) continue;
@@ -302,87 +395,44 @@ static size_t walk_dir(
                 char full[SEARCH_PATH_BUF];
                 join_path(full, sizeof(full), dir, name);
 
-                // 如果指定了要搜索的内容，则检查文件内容是否包含指定的内容
-                if (contains && !file_contains_substring(full, contains)) continue;
-                
-                char mtime[32];
-                // 格式化之后的文件修改时间存储在mtime中
-                format_filetime_local(&data.ftLastWriteTime, mtime, sizeof(mtime));
-                // 把文件大小的高32位左移32位，通过和低32位做或运算，得到一个64位整数，即文件大小
-                uint64_t size64 = ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
-                // 输出文件路径、文件大小和文件修改时间
-                printf("%s | %" PRIu64 " bytes | mtime=%s\n", full, size64, mtime);
-
-                // 打印文件内容
-                if (contains) {
-                    print_content_matches(full, contains);
-                }
-
-                found++;
-
-                if (max_results > 0 && found >= max_results) break;
+                // 把临时字符串full复制一份，并存储到candidates中
+                char * copy = dup_path(full);
+                if (!copy) continue;
+                if (!str_vec_push(candidates, copy)) return;
             }
         }
     } while (FindNextFileA(h, &data) != 0);
 
     FindClose(h);
-    return found;
 }
 
 
-static size_t search_root(
+static void search_root_collect(
     const char * root,
     const char * pattern,
     const char ** ignore_patterns,
     size_t ignore_count,
-    size_t max_results,
-    size_t found,
-    const char * contains
+    StrVec * candidates
 ) {
-    // 该函数只处理根目录，根据找到的是目录还是文件，分别调用walk_dir或进行文件名匹配
-    if (max_results > 0 && found >= max_results) return found;
-
-    // 通过GetFileAttributesA函数获取文件属性
+    // 通过GetFileAttributesA函数获取根目录的属性
     DWORD attr = GetFileAttributesA(root);
-    if (attr == INVALID_FILE_ATTRIBUTES) return found;
+    if (attr == INVALID_FILE_ATTRIBUTES) return;
 
     const char * name = basename_of(root);
     if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         // 如果是目录，则先看看是否需要忽略
-        if (should_ignore_name(ignore_patterns, ignore_count, name)) return found;
+        if (should_ignore_name(ignore_patterns, ignore_count, name)) return;
         // 无需忽略，则递归遍历目录
-        return walk_dir(root, pattern, ignore_patterns, ignore_count, max_results, found, contains);
+        walk_dir(root, pattern, ignore_patterns, ignore_count, candidates);
+        return;
     }
 
     // 如果是文件，则进行文件名匹配，看看是否需要忽略，并且是否匹配模式
     if (!should_ignore_name(ignore_patterns, ignore_count, name) && wildcard_match(pattern, name)) {
-        
-        // 注意这里用的结构体是WIN32_FILE_ATTRIBUTE_DATA，而不是WIN32_FIND_DATAA，
-        // 前面遍历目录时使用结构体WIN32_FIND_DATAA，配合函数FindFirstFileA和FindNextFileA，
-        // 这里是获取单个文件的属性信息，所以使用结构体WIN32_FILE_ATTRIBUTE_DATA，配合函数GetFileAttributesExA
-        WIN32_FILE_ATTRIBUTE_DATA fad;
-        if (GetFileAttributesExA(root, GetFileExInfoStandard, &fad)) {
-            if (contains && !file_contains_substring(root, contains)) return found;
-
-            // 这部分操作和前面相同，不再赘述
-            char mtime[32];
-            format_filetime_local(&fad.ftLastWriteTime, mtime, sizeof(mtime));
-            uint64_t size64 = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
-            printf("%s | %" PRIu64 " bytes | mtime=%s\n", root, size64, mtime);
-
-            // 打印文件内容
-            if (contains) {
-                print_content_matches(root, contains);
-            }
-
-        } else {
-            // 如果拿不到信息就退化为只打印路径
-            printf("Failed to get file attributes for %s\n", root);
-        }
-
-        found++;
+        char * copy = dup_path(root);
+        if (!copy) return;
+        str_vec_push(candidates, copy);  // 这里已经到函数尾部，所以即便push失败，也会返回
     }
-    return found;
 }
 
 
@@ -395,14 +445,19 @@ size_t search_files_single_thread(
     size_t max_results,
     const char * contains
 ) {
-    // 入口函数，用于遍历所有根目录，并调用search_root函数进行搜索
-    size_t found = 0;
+    // 入口函数，用于遍历所有根目录，并调用search_root_collect函数进行搜索
+    StrVec candidates;  // 存储所有符合条件的路径
+    str_vec_init(&candidates);
 
+    // 遍历根目录下的所有目录和文件，并收集符合条件的候选路径
     for (size_t i = 0; i < roots_count; i++) {
-        found = search_root(roots[i], pattern, ignore_patterns, ignore_count, max_results, found, contains);
-        // 如果找到的结果数量达到最大限制，则停止搜索
-        if (max_results > 0 && found >= max_results) break;
+        search_root_collect(roots[i], pattern, ignore_patterns, ignore_count, &candidates);
     }
 
+    // 遍历所有符合条件的候选路径，经过内容和搜索总数的筛选后，
+    // 针对最终符合要求的候选路径，打印路径、文件大小和文件修改时间，并输出文件内容
+    size_t found = emit_candidates(&candidates, contains, max_results);
+    // 释放内存
+    str_vec_free(&candidates);
     return found;
 }
